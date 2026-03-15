@@ -2,7 +2,9 @@ import os
 import re
 import base64
 import logging
+import tempfile
 import httpx
+from gtts import gTTS
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, ContextTypes, filters
 import anthropic
@@ -179,7 +181,19 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         reply = claude_response.content[0].text
         user_histories[user_id].append({"role": "assistant", "content": reply})
-        await update.message.reply_text(f"🎤 _«{text}»_\n\n{label}\n\n{reply}", parse_mode="Markdown")
+
+        # Detect language for TTS (simple heuristic)
+        lang = "uk" if re.search(r"[а-яіїєґА-ЯІЇЄҐ]", reply) else "en"
+
+        # Generate voice response
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
+            tts_path = f.name
+        gTTS(text=reply, lang=lang).save(tts_path)
+
+        await update.message.reply_text(f"🎤 _«{text}»_", parse_mode="Markdown")
+        with open(tts_path, "rb") as audio:
+            await update.message.reply_voice(voice=audio)
+        os.unlink(tts_path)
     except Exception as e:
         logger.error(f"Error [voice→claude]: {e}")
         await update.message.reply_text("Помилка при відповіді. Спробуй ще раз.")
