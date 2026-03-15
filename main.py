@@ -1,5 +1,6 @@
 import os
 import re
+import base64
 import logging
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, ContextTypes, filters
@@ -39,7 +40,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Привіт! Я OpenClaw — бот на базі Claude AI.\n\n"
         "🟢 Haiku — для чату\n"
         "🟡 Sonnet — для задач\n"
-        "🔴 Opus — для складного коду\n\n"
+        "🔴 Opus — для складного коду\n"
+        "🖼 Фото — аналізую зображення\n\n"
         "Модель обирається автоматично!"
     )
 
@@ -70,10 +72,66 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error: {e}")
         await update.message.reply_text("Сталася помилка. Спробуй ще раз.")
 
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    caption = update.message.caption or "Що на цьому фото? Опиши детально."
+
+    if user_id not in user_histories:
+        user_histories[user_id] = []
+
+    # Download the highest quality photo
+    photo = update.message.photo[-1]
+    file = await context.bot.get_file(photo.file_id)
+    image_bytes = await file.download_as_bytearray()
+    image_b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
+
+    # Build message with image — always use Sonnet for vision
+    model = "claude-sonnet-4-6"
+    label = "🟡 Sonnet 🖼"
+
+    image_message = {
+        "role": "user",
+        "content": [
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/jpeg",
+                    "data": image_b64,
+                },
+            },
+            {"type": "text", "text": caption},
+        ],
+    }
+
+    # For history we store text-only version
+    history_message = {"role": "user", "content": f"[фото] {caption}"}
+    user_histories[user_id].append(history_message)
+    if len(user_histories[user_id]) > 20:
+        user_histories[user_id] = user_histories[user_id][-20:]
+
+    logger.info(f"user={user_id} model={model} photo+caption")
+
+    try:
+        # Send image directly (not via history to avoid storing large b64)
+        messages_with_image = user_histories[user_id][:-1] + [image_message]
+        response = client.messages.create(
+            model=model,
+            max_tokens=2048,
+            messages=messages_with_image,
+        )
+        reply = response.content[0].text
+        user_histories[user_id].append({"role": "assistant", "content": reply})
+        await update.message.reply_text(f"{label}\n\n{reply}")
+    except Exception as e:
+        logger.error(f"Error [photo]: {e}")
+        await update.message.reply_text("Не вдалося обробити фото. Спробуй ще раз.")
+
 def main():
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     logger.info("Bot started")
     app.run_polling()
 
