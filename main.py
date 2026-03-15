@@ -93,19 +93,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     provider, label = pick_provider(text)
     logger.info(f"user={user_id} provider={provider} len={len(text)}")
 
-    try:
-        if provider == "claude":
-            reply = ask_claude(user_histories[user_id])
-        elif provider == "gemini":
-            reply = ask_gemini(user_histories[user_id])
-        else:
-            reply = ask_groq(user_histories[user_id])
+    fallback_chain = {
+        "groq": [("groq", "⚡ Groq"), ("gemini", "♊ Gemini"), ("claude", "🤖 Claude")],
+        "gemini": [("gemini", "♊ Gemini"), ("groq", "⚡ Groq"), ("claude", "🤖 Claude")],
+        "claude": [("claude", "🤖 Claude")],
+    }
 
+    reply = None
+    used_label = label
+    for p, lbl in fallback_chain[provider]:
+        try:
+            if p == "claude":
+                reply = ask_claude(user_histories[user_id])
+            elif p == "gemini":
+                reply = ask_gemini(user_histories[user_id])
+            else:
+                reply = ask_groq(user_histories[user_id])
+            used_label = lbl
+            break
+        except Exception as e:
+            logger.warning(f"Provider [{p}] failed: {e}, trying next...")
+
+    if reply:
         user_histories[user_id].append({"role": "assistant", "content": reply})
-        await update.message.reply_text(f"{label}\n\n{reply}")
-    except Exception as e:
-        logger.error(f"Error [{provider}]: {e}")
-        await update.message.reply_text("Сталася помилка. Спробуй ще раз.")
+        await update.message.reply_text(f"{used_label}\n\n{reply}")
+    else:
+        await update.message.reply_text("Всі провайдери недоступні. Спробуй пізніше.")
 
 def main():
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
