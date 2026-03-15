@@ -1,4 +1,5 @@
 import os
+import re
 import logging
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, ContextTypes, filters
@@ -14,9 +15,35 @@ client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 user_histories: dict[int, list] = {}
 
+# Keywords that signal serious/complex tasks
+OPUS_KEYWORDS = re.compile(
+    r"\b(алгоритм|архітектур|оптимізац|рефактор|debug|дебаг|помилк|баг|складн|реалізу|напиши код|зроби систем"
+    r"|algorithm|architect|optim|refactor|implement|complex|system design|debug)\b",
+    re.IGNORECASE,
+)
+SONNET_KEYWORDS = re.compile(
+    r"\b(поясни|розкажи|як працює|що таке|порівняй|проаналізуй|напиши|зроби|допоможи|знайди"
+    r"|explain|how does|what is|compare|analyze|write|create|help|find)\b",
+    re.IGNORECASE,
+)
+
+def pick_model(text: str) -> tuple[str, str]:
+    """Returns (model_id, label)"""
+    if len(text) > 300 or OPUS_KEYWORDS.search(text):
+        return "claude-opus-4-6", "🔴 Opus"
+    if len(text) > 80 or SONNET_KEYWORDS.search(text):
+        return "claude-sonnet-4-6", "🟡 Sonnet"
+    return "claude-haiku-4-5-20251001", "🟢 Haiku"
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_histories.pop(update.effective_user.id, None)
-    await update.message.reply_text("Привіт! Я OpenClaw — бот на базі Claude AI. Напиши мені що-небудь!")
+    await update.message.reply_text(
+        "Привіт! Я OpenClaw — бот на базі Claude AI.\n\n"
+        "🟢 Haiku — для чату\n"
+        "🟡 Sonnet — для задач\n"
+        "🔴 Opus — для складного коду\n\n"
+        "Модель обирається автоматично!"
+    )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -27,19 +54,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_histories[user_id].append({"role": "user", "content": text})
 
-    # Keep last 20 messages
     if len(user_histories[user_id]) > 20:
         user_histories[user_id] = user_histories[user_id][-20:]
 
+    model, label = pick_model(text)
+    logger.info(f"user={user_id} model={model} len={len(text)}")
+
     try:
         response = client.messages.create(
-            model="claude-opus-4-6",
+            model=model,
             max_tokens=2048,
             messages=user_histories[user_id],
         )
         reply = response.content[0].text
         user_histories[user_id].append({"role": "assistant", "content": reply})
-        await update.message.reply_text(reply)
+        await update.message.reply_text(f"{label}\n\n{reply}")
     except Exception as e:
         logger.error(f"Error: {e}")
         await update.message.reply_text("Сталася помилка. Спробуй ще раз.")
