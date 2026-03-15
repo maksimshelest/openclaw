@@ -2,6 +2,7 @@ import os
 import re
 import base64
 import logging
+import httpx
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, ContextTypes, filters
 import anthropic
@@ -11,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
+GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
@@ -127,11 +129,67 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error [photo]: {e}")
         await update.message.reply_text("Не вдалося обробити фото. Спробуй ще раз.")
 
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+
+    if user_id not in user_histories:
+        user_histories[user_id] = []
+
+    # Download voice file
+    voice = update.message.voice
+    file = await context.bot.get_file(voice.file_id)
+    voice_bytes = await file.download_as_bytearray()
+
+    await update.message.reply_text("🎤 Розпізнаю голос...")
+
+    # Transcribe with Groq Whisper
+    try:
+        response = httpx.post(
+            "https://api.groq.com/openai/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+            files={"file": ("voice.ogg", bytes(voice_bytes), "audio/ogg")},
+            data={"model": "whisper-large-v3", "response_format": "text"},
+            timeout=30,
+        )
+        response.raise_for_status()
+        text = response.text.strip()
+    except Exception as e:
+        logger.error(f"Whisper error: {e}")
+        await update.message.reply_text("Не вдалося розпізнати голос. Спробуй ще раз.")
+        return
+
+    if not text:
+        await update.message.reply_text("Не розчув. Спробуй ще раз.")
+        return
+
+    logger.info(f"user={user_id} transcribed: {text[:80]}")
+
+    # Process transcribed text through Claude
+    user_histories[user_id].append({"role": "user", "content": text})
+    if len(user_histories[user_id]) > 20:
+        user_histories[user_id] = user_histories[user_id][-20:]
+
+    model, label = pick_model(text)
+
+    try:
+        claude_response = client.messages.create(
+            model=model,
+            max_tokens=2048,
+            messages=user_histories[user_id],
+        )
+        reply = claude_response.content[0].text
+        user_histories[user_id].append({"role": "assistant", "content": reply})
+        await update.message.reply_text(f"🎤 _«{text}»_\n\n{label}\n\n{reply}", parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Error [voice→claude]: {e}")
+        await update.message.reply_text("Помилка при відповіді. Спробуй ще раз.")
+
 def main():
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     logger.info("Bot started")
     app.run_polling()
 
